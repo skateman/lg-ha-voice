@@ -76,7 +76,7 @@ var MIC_KEYCODE    = '428';
 // Running applicationManager/launch with & decouples it from the service process –
 // calling it inside the service would cause webOS to restart the service mid-pipeline.
 var HANDLER_CONTENT = '#!/bin/sh\n'
-  + 'VALUE="$1"\n'
+  + 'VALUE="${1:-1}"\n'
   + 'if [ "$VALUE" = "1" ]; then\n'
   + '  luna-send -n 1 luna://com.webos.applicationManager/launch \'{"id":"com.homebrew.havoice","params":{"action":"overlay"}}\' &\n'
   + '  luna-send -n 1 luna://com.homebrew.havoice.service/voice/start \'{}\'\n'
@@ -103,7 +103,8 @@ function isSetupDone() {
   try {
     var kb = JSON.parse(fs.readFileSync(KEYBINDS_PATH, 'utf8'));
     var e  = kb[MIC_KEYCODE];
-    return e && e.action === 'exec' && e.command === HANDLER_SCRIPT;
+    if (!e || e.action !== 'exec' || e.command !== HANDLER_SCRIPT) return false;
+    return fs.readFileSync(HANDLER_SCRIPT, 'utf8') === HANDLER_CONTENT;
   } catch (_) { return false; }
 }
 
@@ -483,6 +484,10 @@ function wsConnect(wsUrl, onMessage, onError, onClose) {
       var payload = new Buffer(String(data), 'utf8');
       wsSend(0x01, payload);
     },
+    sendBinary: function(data) {
+      var payload = Buffer.isBuffer(data) ? data : new Buffer(data);
+      wsSend(0x02, payload);
+    },
     close: function() {
       socket.destroy();
     },
@@ -502,6 +507,8 @@ var voiceSocket      = null;     // Unix socket to voiceinput
 var voiceSubscribers = {};       // token → Luna message (for voice/state subscriptions)
 var voiceSub        = null;     // voiceinput luna subscription handle
 var voiceMsgId      = 1;
+var voiceSttHandlerId = null;   // HA binary WebSocket handler for PCM audio
+var voiceStopPending = false;
 
 // Persist HA config so mic button works without the app being open first.
 // /media/developer/ is on NAND and survives TV reboots (unlike /tmp/).
@@ -542,6 +549,8 @@ function voiceCleanup() {
   if (voiceSocket) { try { voiceSocket.destroy(); } catch (_) {} voiceSocket = null; }
   if (voiceSub)    { try { voiceSub.cancel();     } catch (_) {} voiceSub    = null; }
   if (voiceWS)     { try { voiceWS.close();       } catch (_) {} voiceWS     = null; }
+  voiceSttHandlerId = null;
+  voiceStopPending = false;
 }
 
 // Transition to error then auto-recover to idle after 3 s.
@@ -656,8 +665,7 @@ function doStartVoicePipeline() {
 
       } else if (msg.type === 'result' && msg.id === runId) {
         if (msg.success) {
-          log('pipeline started, connecting voiceinput');
-          startVoiceInput();
+          log('pipeline accepted, waiting for binary audio handler');
         } else {
           var errMsg = msg.error && msg.error.message ? msg.error.message : 'pipeline start failed';
           setVoiceError(errMsg);
@@ -683,16 +691,32 @@ function doStartVoicePipeline() {
 function handlePipelineEvent(evt) {
   if (!evt) return;
   log('pipeline event:', evt.type);
-  if (evt.type === 'stt-end') {
+  if (evt.type === 'run-start') {
+    var handlerId = evt.data && evt.data.runner_data && evt.data.runner_data.stt_binary_handler_id;
+    if (typeof handlerId !== 'number') {
+      setVoiceError('pipeline did not provide an STT binary handler');
+      return;
+    }
+    voiceSttHandlerId = handlerId;
+    log('STT binary handler:', handlerId);
+    if (voiceStopPending) {
+      doStopListening();
+    } else {
+      startVoiceInput();
+    }
+
+  } else if (evt.type === 'stt-end') {
     voiceTranscript = (evt.data && evt.data.stt_output && evt.data.stt_output.text) || '';
     log('transcript received, len=' + voiceTranscript.length); // F7: never log the text
     setVoiceState('processing');
 
-  } else if (evt.type === 'tts-start') {
+  } else if (evt.type === 'tts-start' || evt.type === 'tts-end') {
     var url = (evt.data && evt.data.tts_output && evt.data.tts_output.url) || '';
-    log('tts-start url:', url);
-    voiceTtsUrl = url;
-    setVoiceState('speaking');
+    if (url) {
+      log(evt.type + ' url:', url);
+      voiceTtsUrl = url;
+      setVoiceState('speaking');
+    }
 
   } else if (evt.type === 'error') {
     setVoiceError((evt.data && evt.data.message) || 'pipeline error');
@@ -738,12 +762,12 @@ function connectToAudioSocket(socketPath) {
   });
 
   sock.on('data', function(chunk) {
-    if (voiceState !== 'listening' || !voiceWS) return;
-    // Stream raw PCM to HA as base64-encoded stt_stream/append
-    voiceWS.send(JSON.stringify({
-      type: 'assist_pipeline/stt_stream/append',
-      data: chunk.toString('base64'),
-    }));
+    if (voiceState !== 'listening' || !voiceWS || voiceSttHandlerId === null) return;
+    // HA expects binary PCM frames prefixed by the assigned handler byte.
+    var framed = new Buffer(chunk.length + 1);
+    framed[0] = voiceSttHandlerId;
+    chunk.copy(framed, 1);
+    voiceWS.sendBinary(framed);
   });
 
   sock.on('error', function(err) {
@@ -760,9 +784,12 @@ function doStopListening() {
   if (voiceSocket) { voiceSocket.destroy(); voiceSocket = null; }
   if (voiceSub)    { try { voiceSub.cancel(); } catch (_) {} voiceSub = null; }
   setVoiceState('processing');
-  if (voiceWS) {
-    voiceWS.send(JSON.stringify({ type: 'assist_pipeline/stt_stream/end' }));
-    log('sent stt_stream/end');
+  if (voiceWS && voiceSttHandlerId !== null) {
+    voiceWS.sendBinary(new Buffer([voiceSttHandlerId]));
+    voiceStopPending = false;
+    log('sent binary STT end frame');
+  } else {
+    voiceStopPending = true;
   }
 }
 
@@ -1182,13 +1209,13 @@ function runHATextPipeline(text, onIntentResult) {
               localWS.close();
             }
 
-          } else if (evt.type === 'tts-start') {
+          } else if (evt.type === 'tts-start' || evt.type === 'tts-end') {
             var url = (evt.data && evt.data.tts_output && evt.data.tts_output.url) || '';
-            log('[vc] tts url:', url);
+            log('[vc] ' + evt.type + ' url:', url);
             if (url) {
               voiceTtsUrl = url;
               setVoiceState('speaking');
-            } else if (vcSpeechText) {
+            } else if (evt.type === 'tts-end' && vcSpeechText) {
               speakNative(vcSpeechText);
               vcSpeechText = '';
             }

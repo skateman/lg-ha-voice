@@ -10,9 +10,9 @@
  *   13   – OK / Enter (also triggers voice)
  *   461  – BACK
  *
- * Mic button (keycode 428) is handled by the inputhook → service/voice/start
- * and service/voice/stop.  The OK button and orb click are handled here via
- * luna calls to the same service endpoints.
+ * Mic button (keycode 428) is handled by inputhook → service/voice/start.
+ * Legacy inputhook also signals service/voice/stop on release; inputhookpp
+ * relies on voiceinput VAD. The OK button and orb click use the same endpoints.
  */
 
 import { HAClient } from './ha-client.js';

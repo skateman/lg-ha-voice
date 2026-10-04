@@ -5,12 +5,10 @@
 # Must be run ON THE TV (via SSH).
 #
 # How it works:
-#   - inputhook fires the "exec" command on EVERY key event (press + release)
-#   - We point it to a small wrapper script that reads /dev/stdin to check
-#     whether the event is a press (value=1) or release (value=0) and then
-#     calls luna-send accordingly.
-#   - inputhook passes the event value as the argument to the command:
-#       exec_cmd <value>   where value=1 means press, value=0 means release
+#   - Legacy inputhook passes an event value on press and release.
+#   - inputhookpp 1.5+ executes only on key-down and passes no argument.
+#   - The wrapper treats a missing argument as a press. VAD ends recording
+#     automatically when inputhookpp cannot signal button release.
 #
 # After running this script:
 #   1. App receives {"action":"start"} on press  → begin recording
@@ -24,10 +22,10 @@ KEYBINDS_PATH="/home/root/.config/lginputhook/keybinds.json"
 # ── Write the mic button handler script ────────────────────────────────────────
 cat > "$SCRIPT_PATH" << 'HANDLER'
 #!/bin/sh
-# Called by inputhook on every mic button (keycode 428) event.
-# $1 = event value: 1 = press, 0 = release, 2 = repeat (ignored)
+# Legacy inputhook: $1 is 1=press, 0=release, 2=repeat.
+# inputhookpp 1.5+: no argument, key-down only.
 
-VALUE="$1"
+VALUE="${1:-1}"
 
 if [ "$VALUE" = "1" ]; then
   # Button pressed → tell app to start listening

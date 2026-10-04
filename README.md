@@ -86,7 +86,10 @@ What setup does:
 1. Writes `/home/root/.config/lginputhook/ha-voice-mic.sh` — a shell script that calls `luna-send` to the HA Voice service.
 2. Adds keycode `428` (Magic Remote mic button) to `/home/root/.config/lginputhook/keybinds.json` with `action: exec`.
 
-After this, lginputhook will call the script with argument `1` on press and `0` on release.
+Legacy lginputhook calls the script with argument `1` on press and `0` on
+release. Input Hook 1.5+ (`inputhookpp`) executes it once on key-down without an
+argument; HA Voice treats that as press and relies on the TV's voice activity
+detection to finish recording.
 
 ---
 
@@ -222,12 +225,12 @@ service connects to Unix socket
        │  reads raw PCM16 chunks (16 kHz mono, little-endian)
        │  for each chunk:
        ▼
-assist_pipeline/stt_stream/append { data: "<base64 PCM>" }
-       │  (streams continuously while mic button is held)
+binary WebSocket frame: <handler id byte><raw PCM>
+       │  (streams continuously while the mic is active)
        │
        │  [optional: VAD]
        │  voiceinput fires state="voice stop" when silence detected
-       │  → service auto-sends stt_stream/end without waiting for button release
+       │  → service auto-sends an empty binary frame without waiting for release
 
 
 [mic button release]
@@ -242,7 +245,7 @@ luna-send → /voice/stop
 service: destroys Unix socket, cancels voiceinput subscription
        │
        ▼
-assist_pipeline/stt_stream/end
+binary WebSocket frame: <handler id byte>
        │
        ▼
 HA Whisper: transcribes audio → transcript text
@@ -273,7 +276,10 @@ event: run-end → voiceCleanup() → voiceState = "idle"
 
 **Why a custom WebSocket client?** webOS 4 ships Node.js 0.12.2, which predates the `ws` npm package's minimum supported Node version. The service uses a hand-rolled WebSocket client (`wsConnect`) that handles the HTTP upgrade handshake, frame parsing/masking, and ping/pong — all compatible with Node 0.12.
 
-**Audio format:** `com.webos.service.voiceinput` provides raw 16-bit signed PCM at 16 kHz mono. HA's Whisper STT expects exactly this format when receiving `stt_stream/append` frames.
+**Audio format:** `com.webos.service.voiceinput` provides raw 16-bit signed PCM
+at 16 kHz mono. HA assigns a binary WebSocket handler for each pipeline run;
+every PCM frame is prefixed with that one-byte handler ID, and a frame containing
+only the handler ID ends the stream.
 
 ---
 

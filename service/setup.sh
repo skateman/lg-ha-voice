@@ -22,11 +22,11 @@ mkdir -p "$KEYBIND_DIR"
 
 cat > "$HANDLER_SCRIPT" << 'HANDLER'
 #!/bin/sh
-# Called by org.webosbrew.inputhook on every mic button (keycode 428) event.
-# $1 = event value: 1=press, 0=release, 2=repeat (ignored)
+# Legacy inputhook passes $1 as 1=press, 0=release. inputhookpp 1.5+
+# executes only on key-down and passes no argument, which is treated as press.
 # Calls the service directly (applicationManager/launch does not reliably fire
 # webOSRelaunch in the WAM app on all TV models).
-VALUE="$1"
+VALUE="${1:-1}"
 if [ "$VALUE" = "1" ]; then
   luna-send -n 1 luna://com.homebrew.havoice.service/voice/start '{}'
 elif [ "$VALUE" = "0" ]; then

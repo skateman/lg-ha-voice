@@ -51,7 +51,7 @@ class FakeWebSocket {
   // ── WebSocket API ───────────────────────────────────────────────────────────
 
   send(data) {
-    this.sent.push(JSON.parse(data));
+    this.sent.push(typeof data === 'string' ? JSON.parse(data) : new Uint8Array(data));
   }
 
   close() {
@@ -442,24 +442,62 @@ describe('runVoicePipeline', () => {
     expect(onDone).toHaveBeenCalledOnce();
   });
 
-  it('sendAudio sends stt_stream/append messages', () => {
+  it('delivers the TTS URL from tts-end', () => {
+    const onTtsStart = vi.fn();
     const client = makeClient();
     client.connect();
     doAuth(FakeWebSocket.last);
-    const ctrl = client.runVoicePipeline({ onDone: vi.fn(), onError: vi.fn(), onSttEnd: vi.fn() });
-    ctrl.sendAudio('base64data==');
-    expect(FakeWebSocket.last.lastSent).toEqual({
-      type: 'assist_pipeline/stt_stream/append',
-      data: 'base64data==',
+    client.runVoicePipeline({ onTtsStart, onDone: vi.fn(), onError: vi.fn(), onSttEnd: vi.fn() });
+
+    const runId = FakeWebSocket.last.sent.find(m => m.type === 'assist_pipeline/run').id;
+    FakeWebSocket.last.receive({
+      type: 'event', id: runId,
+      event: { type: 'tts-end', data: { tts_output: { url: '/api/tts_proxy/test' } } },
+    });
+    expect(onTtsStart).toHaveBeenCalledWith({
+      tts_output: { url: '/api/tts_proxy/test' },
     });
   });
 
-  it('stop() sends stt_stream/end', () => {
+  it('sendAudio sends binary PCM prefixed by the handler id', () => {
     const client = makeClient();
     client.connect();
     doAuth(FakeWebSocket.last);
     const ctrl = client.runVoicePipeline({ onDone: vi.fn(), onError: vi.fn(), onSttEnd: vi.fn() });
+    const runId = FakeWebSocket.last.sent.find(m => m.type === 'assist_pipeline/run').id;
+    FakeWebSocket.last.receive({
+      type: 'event', id: runId,
+      event: { type: 'run-start', data: { runner_data: { stt_binary_handler_id: 7 } } },
+    });
+    ctrl.sendAudio('AQID');
+    expect(Array.from(FakeWebSocket.last.lastSent)).toEqual([7, 1, 2, 3]);
+  });
+
+  it('queues audio until the handler id arrives', () => {
+    const client = makeClient();
+    client.connect();
+    doAuth(FakeWebSocket.last);
+    const ctrl = client.runVoicePipeline({ onDone: vi.fn(), onError: vi.fn(), onSttEnd: vi.fn() });
+    ctrl.sendAudio('AQI=');
+    const runId = FakeWebSocket.last.sent.find(m => m.type === 'assist_pipeline/run').id;
+    FakeWebSocket.last.receive({
+      type: 'event', id: runId,
+      event: { type: 'run-start', data: { runner_data: { stt_binary_handler_id: 9 } } },
+    });
+    expect(Array.from(FakeWebSocket.last.lastSent)).toEqual([9, 1, 2]);
+  });
+
+  it('stop() sends an empty binary frame for the handler id', () => {
+    const client = makeClient();
+    client.connect();
+    doAuth(FakeWebSocket.last);
+    const ctrl = client.runVoicePipeline({ onDone: vi.fn(), onError: vi.fn(), onSttEnd: vi.fn() });
+    const runId = FakeWebSocket.last.sent.find(m => m.type === 'assist_pipeline/run').id;
+    FakeWebSocket.last.receive({
+      type: 'event', id: runId,
+      event: { type: 'run-start', data: { runner_data: { stt_binary_handler_id: 5 } } },
+    });
     ctrl.stop();
-    expect(FakeWebSocket.last.lastSent).toEqual({ type: 'assist_pipeline/stt_stream/end' });
+    expect(Array.from(FakeWebSocket.last.lastSent)).toEqual([5]);
   });
 });

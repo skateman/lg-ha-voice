@@ -79,6 +79,22 @@ export class HAClient {
     if (!this.connected) throw new Error('Not connected to Home Assistant');
 
     const id = this.#nextId();
+    let handlerId = null;
+    const pendingAudio = [];
+    let stopPending = false;
+
+    const sendAudio = (base64Chunk) => {
+      const raw = atob(base64Chunk);
+      const frame = new Uint8Array(raw.length + 1);
+      frame[0] = handlerId;
+      for (let i = 0; i < raw.length; i++) frame[i + 1] = raw.charCodeAt(i);
+      this.#ws?.send(frame.buffer);
+    };
+
+    const stopAudio = () => {
+      this.#ws?.send(new Uint8Array([handlerId]).buffer);
+    };
+
     const startMsg = {
       id,
       type: 'assist_pipeline/run',
@@ -93,11 +109,21 @@ export class HAClient {
     this.#pendingMessages.set(id, {
       onEvent: (event) => {
         switch (event.type) {
+          case 'run-start':
+            handlerId = event.data?.runner_data?.stt_binary_handler_id;
+            if (!Number.isInteger(handlerId)) {
+              onError?.('Pipeline did not provide an STT binary handler');
+              break;
+            }
+            pendingAudio.splice(0).forEach(sendAudio);
+            if (stopPending) stopAudio();
+            break;
           case 'stt-end':
             onSttEnd?.(event.data?.stt_output?.text ?? '');
             break;
           case 'tts-start':
-            onTtsStart?.(event.data);
+          case 'tts-end':
+            if (event.data?.tts_output?.url) onTtsStart?.(event.data);
             break;
           case 'intent-end':
             onIntentEnd?.(event.data?.intent_output);
@@ -123,12 +149,12 @@ export class HAClient {
 
     return {
       sendAudio: (base64Chunk) => {
-        // stt-stream-append
-        this.#send({ type: 'assist_pipeline/stt_stream/append', data: base64Chunk });
+        if (handlerId == null) pendingAudio.push(base64Chunk);
+        else sendAudio(base64Chunk);
       },
       stop: () => {
-        // stt-stream-end signals end of audio
-        this.#send({ type: 'assist_pipeline/stt_stream/end' });
+        if (handlerId == null) stopPending = true;
+        else stopAudio();
       },
     };
   }
