@@ -21,6 +21,20 @@ cd "$(dirname "$0")/.."
 APP_ID="com.homebrew.havoice"
 DIST="dist"
 
+# The release workflow writes VERSION to GITHUB_ENV for later steps, but its
+# same-step Node process cannot see that value. Stamp it again here before
+# packaging so tagged builds carry the tag version instead of defaulting to
+# 1.0.0.
+if [ -n "${GITHUB_REF_NAME:-}" ]; then
+  VERSION="${GITHUB_REF_NAME#v}"
+  VERSION="$VERSION" node -e "
+    const fs = require('fs');
+    const info = JSON.parse(fs.readFileSync('appinfo.json', 'utf8'));
+    info.version = process.env.VERSION;
+    fs.writeFileSync('appinfo.json', JSON.stringify(info, null, 2) + '\n');
+  "
+fi
+
 # ── Icons ─────────────────────────────────────────────────────────────────────
 if [ ! -f assets/icon.png ] || [ ! -f assets/icon-large.png ]; then
   echo "==> Generating placeholder icons (replace assets/*.png with real artwork)"
