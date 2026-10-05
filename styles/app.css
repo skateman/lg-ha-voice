@@ -227,6 +227,7 @@ html, body {
   animation: ring-expand 1.5s ease-out 0.5s infinite;
 }
 
+.orb.starting .orb-inner,
 .orb.processing .orb-inner {
   animation: spin-glow 1s linear infinite;
 }
@@ -420,6 +421,7 @@ html, body {
   border-top-color: var(--accent);
   animation: vo-spin 0.9s linear infinite;
 }
+.voice-overlay.starting .vo-spinner,
 .voice-overlay.processing .vo-spinner { display: block; }
 
 @keyframes vo-spin {

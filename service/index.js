@@ -14,7 +14,7 @@
  *   /voice/stop       – stop recording, let HA finish STT → TTS.
  *   /voice/toggle     – start/stop for press-only inputhookpp key events.
  *   /voice/abort      – abort immediately, return to idle.
- *   /voice/state      – subscribe to { state, transcript, ttsUrl } push updates.
+ *   /voice/state      – subscribe to { state, transcript, responseText, ttsUrl }.
  *
  * webos-service is provided by the TV's Node.js runtime – do NOT bundle it.
  */
@@ -502,9 +502,10 @@ function wsConnect(wsUrl, onMessage, onError, onClose) {
 
 var STT_MODE = { LG: 'lg', HA: 'ha' };
 
-var voiceState       = 'idle';   // idle | listening | processing | speaking | error
+var voiceState       = 'idle';   // idle | starting | listening | processing | speaking | error
 var voiceTranscript  = '';
 var voiceTtsUrl      = '';
+var voiceResponseText = '';
 var voiceHAConfig    = null;     // { url, token, pipelineId, sttMode }
 var voiceWS          = null;     // active HA WebSocket (STT or text pipeline)
 var voiceSocket      = null;     // Unix socket to voiceinput
@@ -538,6 +539,7 @@ function broadcastVoiceState() {
     state:       voiceState,
     transcript:  voiceTranscript,
     ttsUrl:      tts,
+    responseText: voiceResponseText,
   };
   Object.keys(voiceSubscribers).forEach(function(token) {
     try { voiceSubscribers[token].respond(payload); } catch (_) {}
@@ -564,13 +566,11 @@ function armVoiceListenTimeout() {
   if (voiceListenTimer) clearTimeout(voiceListenTimer);
   voiceListenTimer = setTimeout(function() {
     voiceListenTimer = null;
-    if (voiceState === 'listening') {
-      if (voiceSttHandlerId === null) {
-        setVoiceError('voice pipeline start timeout');
-      } else {
-        log('listen timeout – finishing STT stream');
-        doStopListening();
-      }
+    if (voiceState === 'starting') {
+      setVoiceError('voice pipeline start timeout');
+    } else if (voiceState === 'listening') {
+      log('listen timeout – finishing STT stream');
+      doStopListening();
     }
   }, VOICE_LISTEN_TIMEOUT_MS);
 }
@@ -733,8 +733,15 @@ function handlePipelineEvent(evt) {
     log('transcript received, len=' + voiceTranscript.length); // F7: never log the text
     setVoiceState('processing');
 
+  } else if (evt.type === 'intent-end') {
+    var intentOut = evt.data && evt.data.intent_output;
+    voiceResponseText = (intentOut && intentOut.response && intentOut.response.speech
+                         && intentOut.response.speech.plain
+                         && intentOut.response.speech.plain.speech) || voiceResponseText;
+
   } else if (evt.type === 'tts-start' || evt.type === 'tts-end') {
     var url = (evt.data && evt.data.tts_output && evt.data.tts_output.url) || '';
+    voiceResponseText = (evt.data && evt.data.tts_input) || voiceResponseText;
     if (url) {
       log(evt.type + ' url:', url);
       voiceTtsUrl = url;
@@ -782,7 +789,12 @@ function connectToAudioSocket(socketPath) {
 
   sock.on('connect', function() {
     log('connected to voiceinput audio socket');
-    armVoiceListenTimeout();
+    if (voiceStopPending) {
+      doStopListening();
+    } else {
+      setVoiceState('listening');
+      armVoiceListenTimeout();
+    }
   });
 
   sock.on('data', function(chunk) {
@@ -830,7 +842,7 @@ function beginVoiceInteraction(fromApp) {
   }
   voiceTranscript = '';
   voiceTtsUrl     = '';
-  setVoiceState('listening');
+  voiceResponseText = '';
 
   if (!fromApp) {
     sendToast(service, 'Listening…');
@@ -840,10 +852,12 @@ function beginVoiceInteraction(fromApp) {
 
   var sttMode = (voiceHAConfig && voiceHAConfig.sttMode) || STT_MODE.LG;
   if (sttMode === STT_MODE.HA) {
+    setVoiceState('starting');
     startVoicePipeline();
     return;
   }
 
+  setVoiceState('listening');
   service.call(
     'luna://com.webos.service.voiceconductor/recognizeVoice',
     {},
@@ -964,6 +978,9 @@ service.register('voice/toggle', function(message) {
   log('voice/toggle, state=' + voiceState);
   if (voiceState === 'listening') {
     doStopListening();
+  } else if (voiceState === 'starting') {
+    voiceStopPending = true;
+    log('voice/toggle: stop requested while microphone is starting');
   } else {
     beginVoiceInteraction(false);
   }
@@ -975,8 +992,12 @@ service.register('voice/toggle', function(message) {
 service.register('voice/stop', function(message) {
   message.respond({ returnValue: true });
   log('voice/stop, state=' + voiceState);
-  if (voiceState !== 'listening') return;
-  doStopListening();
+  if (voiceState === 'listening') {
+    doStopListening();
+  } else if (voiceState === 'starting') {
+    voiceStopPending = true;
+    log('voice/stop: stop requested while microphone is starting');
+  }
 });
 
 /**
@@ -1003,6 +1024,7 @@ service.register('voice/state', function(message) {
     state:       voiceState,
     transcript:  voiceTranscript,
     ttsUrl:      tts,
+    responseText: voiceResponseText,
   });
 
   if (message.isSubscription()) {
@@ -1239,6 +1261,7 @@ function runHATextPipeline(text, onIntentResult) {
             // Stash HA's spoken reply for native TTS fallback if tts-start has no URL.
             vcSpeechText = (intentOut && intentOut.response && intentOut.response.speech
                            && intentOut.response.speech.plain && intentOut.response.speech.plain.speech) || '';
+            voiceResponseText = vcSpeechText || voiceResponseText;
             if (vcSpeechText) log('[vc] speech text:', JSON.stringify(vcSpeechText));
             signalIntent(matched);
 
@@ -1251,6 +1274,7 @@ function runHATextPipeline(text, onIntentResult) {
 
           } else if (evt.type === 'tts-start' || evt.type === 'tts-end') {
             var url = (evt.data && evt.data.tts_output && evt.data.tts_output.url) || '';
+            voiceResponseText = (evt.data && evt.data.tts_input) || voiceResponseText;
             log('[vc] ' + evt.type + ' url:', url);
             if (url) {
               voiceTtsUrl = url;

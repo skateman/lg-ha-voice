@@ -30,6 +30,7 @@ const VOICE_KEYS = new Set([KEY.OK, KEY.MIC, KEY.AI]);
 // ── Voice state (mirrored from service via subscription) ──────────────────────
 const SvcState = Object.freeze({
   IDLE:       'idle',
+  STARTING:   'starting',
   LISTENING:  'listening',
   PROCESSING: 'processing',
   SPEAKING:   'speaking',
@@ -430,7 +431,7 @@ btnSetup.addEventListener('click', async () => {
 
   try {
     await lunaCall('luna://com.homebrew.havoice.service/setup', {});
-    setupStatus.textContent = 'Done! Hold mic button to talk.';
+    setupStatus.textContent = 'Done! Press the mic button to talk.';
     setTimeout(hideSetupNotice, 2000);
   } catch (err) {
     setupStatus.textContent = `Failed: ${err.message}. Run setup.sh via SSH.`;
@@ -454,7 +455,8 @@ function subscribeVoiceState() {
       // Mic button pressed while in another app: service launched us but
       // webOSRelaunch may not fire on this TV model.  Detect the idle→listening
       // transition and enter overlay mode so we auto-hide when the pipeline ends.
-      if (newState === SvcState.LISTENING && svcState === SvcState.IDLE) {
+      if ((newState === SvcState.STARTING || newState === SvcState.LISTENING)
+          && svcState === SvcState.IDLE) {
         if (_appInitiatedVoice) {
           _appInitiatedVoice = false; // app started it — stay in normal mode
         } else if (!_overlayMode && document.hidden) {
@@ -471,7 +473,7 @@ function subscribeVoiceState() {
         showTranscript(svcTranscript);
         showToast(svcTranscript);
       }
-      if (res.ttsUrl) playTts(res.ttsUrl);
+      if (res.ttsUrl) playTts(res.ttsUrl, res.responseText || '');
     }
   );
 }
@@ -522,25 +524,61 @@ function cancelTvPowerSub() {
 
 // ── TTS playback ──────────────────────────────────────────────────────────────
 
-function playTts(ttsUrl) {
+let _ttsAudio = null;
+let _ttsStartTimer = null;
+
+function stopTtsPlayback() {
+  if (_ttsStartTimer) {
+    clearTimeout(_ttsStartTimer);
+    _ttsStartTimer = null;
+  }
+  if (_ttsAudio) {
+    try { _ttsAudio.pause(); } catch (_) {}
+    _ttsAudio.src = '';
+    _ttsAudio = null;
+  }
+  lunaCall('luna://com.webos.service.audio/tv/mixDigitalSoundOutput', { mix: false }).catch(() => {});
+}
+
+function playTts(ttsUrl, responseText) {
+  stopTtsPlayback();
   try {
     const url = ttsUrl.startsWith('http') ? ttsUrl : config.url.replace(/\/$/, '') + ttsUrl;
     lunaCall('luna://com.webos.service.audio/tv/mixDigitalSoundOutput', { mix: true }).catch(() => {});
-    const audio = new Audio(url);
+    const audio = new Audio();
+    _ttsAudio = audio;
+    let fallbackUsed = false;
+
+    const fallback = (reason) => {
+      if (fallbackUsed || _ttsAudio !== audio) return;
+      fallbackUsed = true;
+      console.warn('[TTS] falling back to native TTS:', reason);
+      stopTtsPlayback();
+      speakNative(responseText || 'Sorry, I could not play the response.');
+    };
+
+    audio.preload = 'auto';
+    audio.src = url;
+    audio.onplaying = () => {
+      if (_ttsStartTimer) {
+        clearTimeout(_ttsStartTimer);
+        _ttsStartTimer = null;
+      }
+    };
     audio.onended = () => {
-      lunaCall('luna://com.webos.service.audio/tv/mixDigitalSoundOutput', { mix: false }).catch(() => {});
+      if (_ttsAudio === audio) stopTtsPlayback();
     };
     audio.onerror = () => {
-      lunaCall('luna://com.webos.service.audio/tv/mixDigitalSoundOutput', { mix: false }).catch(() => {});
-      console.warn('[TTS] playback error');
-      speakNative('Sorry, I could not play the response.');
+      fallback('audio error');
     };
     audio.play().catch(e => {
-      lunaCall('luna://com.webos.service.audio/tv/mixDigitalSoundOutput', { mix: false }).catch(() => {});
-      console.warn('[TTS] play() rejected', e);
+      fallback(`play() rejected: ${e?.message || e}`);
     });
+    _ttsStartTimer = setTimeout(() => fallback('playback did not start'), 5000);
   } catch (e) {
     console.warn('[TTS] playTts error', e);
+    stopTtsPlayback();
+    speakNative(responseText || 'Sorry, I could not play the response.');
   }
 }
 
@@ -569,19 +607,26 @@ function voiceAbort() {
 // ── Orb UI ─────────────────────────────────────────────────────────────────────
 const STATE_LABELS = {
   [SvcState.IDLE]:       'Press mic button or OK to talk',
-  [SvcState.LISTENING]:  'Listening… release mic button to send',
+  [SvcState.STARTING]:   'Starting microphone…',
+  [SvcState.LISTENING]:  'Listening… press again or pause to send',
   [SvcState.PROCESSING]: 'Processing…',
   [SvcState.SPEAKING]:   'Speaking…',
   [SvcState.ERROR]:      'Something went wrong',
 };
 
 const OVERLAY_LABELS = {
+  [SvcState.STARTING]:   'Starting microphone…',
   [SvcState.LISTENING]:  'Listening…',
   [SvcState.PROCESSING]: 'Processing…',
   [SvcState.SPEAKING]:   'Speaking…',
 };
 
-const ACTIVE_STATES = new Set([SvcState.LISTENING, SvcState.PROCESSING, SvcState.SPEAKING]);
+const ACTIVE_STATES = new Set([
+  SvcState.STARTING,
+  SvcState.LISTENING,
+  SvcState.PROCESSING,
+  SvcState.SPEAKING,
+]);
 
 function setOrbState(state) {
   armIdle(state);
@@ -701,6 +746,8 @@ function handleVoiceActivation() {
   if (svcState === SvcState.IDLE || svcState === SvcState.ERROR) {
     hideTranscript();
     voiceStart();
+  } else if (svcState === SvcState.STARTING) {
+    voiceAbort();
   } else if (svcState === SvcState.LISTENING) {
     voiceStop();
   } else if (svcState === SvcState.SPEAKING || svcState === SvcState.PROCESSING) {
