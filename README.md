@@ -302,6 +302,10 @@ This is the easiest way to connect when you don't want to create a long-lived to
 7. The TV app polls `/pending-config` every 2 seconds — it picks up the credentials automatically and connects.
 
 The refresh token is stored so the app can renew the access token silently when it expires (HA access tokens expire after a few minutes when issued via OAuth; long-lived tokens do not expire).
+The Luna service copy is authoritative on startup, so app updates or cleared
+browser storage recover the refreshed credentials instead of requiring another
+login. Saving unchanged URL/token values in Settings preserves the refresh
+token while allowing the pipeline or STT mode to change.
 
 **Flow diagram:**
 

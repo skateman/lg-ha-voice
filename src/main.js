@@ -108,6 +108,7 @@ let haClient     = null;
 let config       = loadConfig();
 let _overlayMode = false;  // true when launched from another app via overlay param
 let _authRecoveryTried = false; // guard: only try service-config recovery once per session
+let _lastTtsUrl = '';
 
 // ── webOS launch params ────────────────────────────────────────────────────────
 function getLaunchParams() {
@@ -147,7 +148,7 @@ function handleLaunchParams(params) {
     // is also auto-triggered from the subscription callback on state transitions.
     _overlayMode = true;
     showMain();
-    if (!_voiceStateSub) subscribeVoiceState();
+    subscribeVoiceState();
     return;
   }
 
@@ -167,11 +168,15 @@ function handleLaunchParams(params) {
 // subscription callback won't fire while frozen.  When applicationManager/launch
 // brings the app to the foreground, visibilitychange fires and we re-subscribe
 // to get the current service state immediately.
-document.addEventListener('visibilitychange', () => {
+function refreshVoiceStateSubscription() {
   if (!document.hidden && screenMain.classList.contains('active')) {
     subscribeVoiceState();
   }
-});
+}
+
+document.addEventListener('visibilitychange', refreshVoiceStateSubscription);
+window.addEventListener('focus', refreshVoiceStateSubscription);
+window.addEventListener('pageshow', refreshVoiceStateSubscription);
 
 // ── Boot ───────────────────────────────────────────────────────────────────────
 const launchParams = getLaunchParams();
@@ -183,21 +188,26 @@ if (launchParams.action === 'overlay') {
   _overlayMode = true;
 }
 
-if (config.url && config.token) {
+function startConfiguredApp(params) {
   showMain();
   subscribeVoiceState();
-  initClient(launchParams);
-} else if (window.PalmServiceBridge) {
-  // localStorage may have been cleared (webOS memory pressure / reinstall).
-  // Try to recover from the config the service persisted to disk.
+  initClient(params);
+}
+
+if (window.PalmServiceBridge) {
+  // The service copy survives WAM localStorage loss and can refresh OAuth
+  // tokens. Prefer it on every boot so updates never start from stale creds.
   lunaCall('luna://com.homebrew.havoice.service/getConfig', {})
     .then(svcCfg => {
       applyServiceConfig(svcCfg);
-      showMain();
-      subscribeVoiceState();
-      initClient(launchParams);
+      startConfiguredApp(launchParams);
     })
-    .catch(() => showConfig());
+    .catch(() => {
+      if (config.url && config.token) startConfiguredApp(launchParams);
+      else showConfig();
+    });
+} else if (config.url && config.token) {
+  startConfiguredApp(launchParams);
 } else {
   showConfig();
 }
@@ -322,7 +332,15 @@ btnSave.addEventListener('click', () => {
   }
 
   stopConfigPolling();
-  config = { url, token, pipelineId, sttMode, refreshToken: '', clientId: '' };
+  const preserveOAuth = url === config.url && token === config.token;
+  config = {
+    url,
+    token,
+    pipelineId,
+    sttMode,
+    refreshToken: preserveOAuth ? (config.refreshToken ?? '') : '',
+    clientId:     preserveOAuth ? (config.clientId ?? '') : '',
+  };
   saveConfig(config);
   lunaCall('luna://com.homebrew.havoice.service/stopSetupServer', {}).catch(() => {});
   showConfigStatus('Connecting…', '');
@@ -378,7 +396,6 @@ function initClient(initialParams = {}) {
     // Do NOT cancel voice/state subscription on HA disconnect — it is a local
     // Luna service subscription and must stay alive for mic-button feedback.
     cancelTvPowerSub();
-    setOrbState(SvcState.IDLE);
   });
 
   haClient.on('auth_error', (msg) => {
@@ -473,7 +490,15 @@ function subscribeVoiceState() {
         showTranscript(svcTranscript);
         showToast(svcTranscript);
       }
-      if (res.ttsUrl) playTts(res.ttsUrl, res.responseText || '');
+      if (res.ttsUrl) {
+        if (res.ttsUrl !== _lastTtsUrl) {
+          _lastTtsUrl = res.ttsUrl;
+          playTts(res.ttsUrl, res.responseText || '');
+        }
+        lunaCall('luna://com.homebrew.havoice.service/voice/ackTts', {
+          ttsUrl: res.ttsUrl,
+        }).catch(() => {});
+      }
     }
   );
 }

@@ -15,6 +15,7 @@
  *   /voice/toggle     – start/stop for press-only inputhookpp key events.
  *   /voice/abort      – abort immediately, return to idle.
  *   /voice/state      – subscribe to { state, transcript, responseText, ttsUrl }.
+ *   /voice/ackTts     – acknowledge receipt of a pending TTS URL.
  *
  * webos-service is provided by the TV's Node.js runtime – do NOT bundle it.
  */
@@ -515,7 +516,9 @@ var voiceMsgId      = 1;
 var voiceSttHandlerId = null;   // HA binary WebSocket handler for PCM audio
 var voiceStopPending = false;
 var voiceListenTimer = null;
+var voiceTtsDeliveryTimer = null;
 var VOICE_LISTEN_TIMEOUT_MS = 12000;
+var TTS_DELIVERY_TIMEOUT_MS = 3000;
 
 // Persist HA config so mic button works without the app being open first.
 // /media/developer/ is on NAND and survives TV reboots (unlike /tmp/).
@@ -528,17 +531,15 @@ try {
 try { fs.chmodSync(HA_CONFIG_FILE, 0o600); } catch (_) {}
 
 /**
- * Push current voice state to all subscribers. ttsUrl is delivered once
- * then cleared so it is not replayed to late-joining subscribers.
+ * Push current voice state to all subscribers. ttsUrl remains available until
+ * the app acknowledges it, so a frozen WAM subscription can recover on relaunch.
  */
 function broadcastVoiceState() {
-  var tts = voiceTtsUrl;
-  voiceTtsUrl = '';
   var payload = {
     returnValue: true,
     state:       voiceState,
     transcript:  voiceTranscript,
-    ttsUrl:      tts,
+    ttsUrl:      voiceTtsUrl,
     responseText: voiceResponseText,
   };
   Object.keys(voiceSubscribers).forEach(function(token) {
@@ -562,6 +563,28 @@ function voiceCleanup() {
   voiceStopPending = false;
 }
 
+function clearPendingTts() {
+  if (voiceTtsDeliveryTimer) {
+    clearTimeout(voiceTtsDeliveryTimer);
+    voiceTtsDeliveryTimer = null;
+  }
+  voiceTtsUrl = '';
+}
+
+function scheduleTtsDeliveryFallback() {
+  if (voiceTtsDeliveryTimer) clearTimeout(voiceTtsDeliveryTimer);
+  if (!voiceTtsUrl) return;
+  var pendingUrl = voiceTtsUrl;
+  voiceTtsDeliveryTimer = setTimeout(function() {
+    voiceTtsDeliveryTimer = null;
+    if (!voiceTtsUrl || voiceTtsUrl !== pendingUrl) return;
+    log('TTS was not acknowledged by the app; using native fallback');
+    voiceTtsUrl = '';
+    if (voiceResponseText) speakNative(voiceResponseText);
+    broadcastVoiceState();
+  }, TTS_DELIVERY_TIMEOUT_MS);
+}
+
 function armVoiceListenTimeout() {
   if (voiceListenTimer) clearTimeout(voiceListenTimer);
   voiceListenTimer = setTimeout(function() {
@@ -578,6 +601,7 @@ function armVoiceListenTimeout() {
 // Transition to error then auto-recover to idle after 3 s.
 function setVoiceError(reason) {
   log('voice error:', reason);
+  clearPendingTts();
   voiceCleanup();
   setVoiceState('error');
   setTimeout(function() { if (voiceState === 'error') setVoiceState('idle'); }, 3000);
@@ -745,6 +769,7 @@ function handlePipelineEvent(evt) {
     if (url) {
       log(evt.type + ' url:', url);
       voiceTtsUrl = url;
+      scheduleTtsDeliveryFallback();
       setVoiceState('speaking');
     }
 
@@ -841,7 +866,7 @@ function beginVoiceInteraction(fromApp) {
     return;
   }
   voiceTranscript = '';
-  voiceTtsUrl     = '';
+  clearPendingTts();
   voiceResponseText = '';
 
   if (!fromApp) {
@@ -1006,6 +1031,7 @@ service.register('voice/stop', function(message) {
 service.register('voice/abort', function(message) {
   message.respond({ returnValue: true });
   log('voice/abort');
+  clearPendingTts();
   voiceCleanup();
   setVoiceState('idle');
 });
@@ -1013,17 +1039,14 @@ service.register('voice/abort', function(message) {
 /**
  * /voice/state – returns current voice state; with subscribe:true the service
  * pushes an update on every state transition so the browser does not need to
- * poll. ttsUrl is delivered exactly once in the broadcast that triggered it.
+ * poll. ttsUrl remains pending until /voice/ackTts confirms receipt.
  */
 service.register('voice/state', function(message) {
-  // Respond immediately with the current snapshot.
-  var tts = voiceTtsUrl;
-  if (tts) voiceTtsUrl = '';
   message.respond({
     returnValue: true,
     state:       voiceState,
     transcript:  voiceTranscript,
-    ttsUrl:      tts,
+    ttsUrl:      voiceTtsUrl,
     responseText: voiceResponseText,
   });
 
@@ -1033,6 +1056,12 @@ service.register('voice/state', function(message) {
       delete voiceSubscribers[message.uniqueToken];
     });
   }
+});
+
+service.register('voice/ackTts', function(message) {
+  var ackUrl = message.payload && message.payload.ttsUrl;
+  if (!ackUrl || ackUrl === voiceTtsUrl) clearPendingTts();
+  message.respond({ returnValue: true });
 });
 
 /**
@@ -1278,6 +1307,7 @@ function runHATextPipeline(text, onIntentResult) {
             log('[vc] ' + evt.type + ' url:', url);
             if (url) {
               voiceTtsUrl = url;
+              scheduleTtsDeliveryFallback();
               setVoiceState('speaking');
             } else if (evt.type === 'tts-end' && vcSpeechText) {
               speakNative(vcSpeechText);
