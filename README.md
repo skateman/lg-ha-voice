@@ -92,6 +92,9 @@ argument, so one press starts recording and a second press stops it. Voice
 activity detection or the 12-second safety timeout can also finish recording.
 With Home Assistant STT, wait for **Listening** after the brief **Starting
 microphone** state before speaking so the beginning of the command is captured.
+The input hook does not launch the app during capture because webOS restarts
+elevated services when their associated app opens. HA Voice is launched only
+after TTS is ready, with the response URL passed directly as a launch parameter.
 
 ---
 

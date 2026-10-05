@@ -26,17 +26,13 @@ cat > "$SCRIPT_PATH" << 'HANDLER'
 VALUE="$1"
 
 if [ -z "$VALUE" ]; then
-  luna-send -n 1 luna://com.webos.applicationManager/launch \
-    '{"id":"com.homebrew.havoice","params":{"action":"overlay"}}' &
   luna-send -n 1 luna://com.homebrew.havoice.service/voice/toggle '{}'
 elif [ "$VALUE" = "1" ]; then
   # Button pressed → tell app to start listening
-  luna-send -n 1 luna://com.webos.applicationManager/launch \
-    '{"id":"com.homebrew.havoice","params":{"action":"start"}}'
+  luna-send -n 1 luna://com.homebrew.havoice.service/voice/start '{}'
 elif [ "$VALUE" = "0" ]; then
   # Button released → tell app to stop listening and send to HA
-  luna-send -n 1 luna://com.webos.applicationManager/launch \
-    '{"id":"com.homebrew.havoice","params":{"action":"stop"}}'
+  luna-send -n 1 luna://com.homebrew.havoice.service/voice/stop '{}'
 fi
 # value=2 (key repeat) is intentionally ignored
 HANDLER

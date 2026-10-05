@@ -127,6 +127,21 @@ if (window.PalmSystem) {
 
 // ── Launch param handling ───────────────────────────────────────────────────────
 function handleLaunchParams(params) {
+  if (params.action === 'tts' && params.ttsUrl) {
+    if (params.ttsUrl === _lastTtsUrl) return;
+    _lastTtsUrl = params.ttsUrl;
+    _overlayMode = true;
+    showMain();
+    if (params.responseText) showTranscript(params.responseText);
+    setOrbState(SvcState.SPEAKING);
+    playTts(params.ttsUrl, params.responseText || '');
+    scheduleOverlayHide();
+    lunaCall('luna://com.homebrew.havoice.service/voice/ackTts', {
+      ttsUrl: params.ttsUrl,
+    }).catch(() => {});
+    return;
+  }
+
   if (params.config) {
     const { url, token, refreshToken, clientId } = params.config;
     if (url && token) {
@@ -184,14 +199,16 @@ const launchParams = getLaunchParams();
 // Set overlay mode immediately from launch params — don't wait for HA connection
 // or the voice/state subscription. If the pipeline finishes before those are ready,
 // _overlayMode would stay false and PalmSystem.hide() would never be called.
-if (launchParams.action === 'overlay') {
+if (launchParams.action === 'overlay' || launchParams.action === 'tts') {
   _overlayMode = true;
 }
 
 function startConfiguredApp(params) {
   showMain();
   subscribeVoiceState();
-  initClient(params);
+  const immediateAction = params?.action === 'overlay' || params?.action === 'tts';
+  initClient(immediateAction ? {} : params);
+  if (immediateAction) setTimeout(() => handleLaunchParams(params), 0);
 }
 
 if (window.PalmServiceBridge) {

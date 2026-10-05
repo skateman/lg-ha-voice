@@ -74,16 +74,13 @@ var HANDLER_DIR    = '/home/root/.config/lginputhook';
 var HANDLER_SCRIPT = path.join(HANDLER_DIR, 'ha-voice-mic.sh');
 var MIC_KEYCODE    = '428';
 
-// Launch the app in background first (so it can show the orb), then start voice.
-// Running applicationManager/launch with & decouples it from the service process –
-// calling it inside the service would cause webOS to restart the service mid-pipeline.
+// Do not launch the associated app while the pipeline is active. webOS restarts
+// elevated app services when their app launches, which aborts capture mid-run.
 var HANDLER_CONTENT = '#!/bin/sh\n'
   + 'VALUE="$1"\n'
   + 'if [ -z "$VALUE" ]; then\n'
-  + '  luna-send -n 1 luna://com.webos.applicationManager/launch \'{"id":"com.homebrew.havoice","params":{"action":"overlay"}}\' &\n'
   + '  luna-send -n 1 luna://com.homebrew.havoice.service/voice/toggle \'{}\'\n'
   + 'elif [ "$VALUE" = "1" ]; then\n'
-  + '  luna-send -n 1 luna://com.webos.applicationManager/launch \'{"id":"com.homebrew.havoice","params":{"action":"overlay"}}\' &\n'
   + '  luna-send -n 1 luna://com.homebrew.havoice.service/voice/start \'{}\'\n'
   + 'elif [ "$VALUE" = "0" ]; then\n'
   + '  luna-send -n 1 luna://com.homebrew.havoice.service/voice/stop \'{}\'\n'
@@ -119,7 +116,37 @@ function sendToast(svc, message) {
 
 function speakNative(text) {
   if (!text) return;
-  service.call('luna://com.webos.service.tts/speak', { text: text, clear: true }, function() {});
+  service.call(
+    'luna://com.webos.service.tts/speak',
+    { text: text, clear: true, appID: APP_ID, feedback: true, subscribe: true },
+    function(msg) {
+      log('native TTS response:', JSON.stringify(msg.payload || {}).slice(0, 200));
+      if (msg.payload && msg.payload.msgStatus === 'done') {
+        try { msg.cancel(); } catch (_) {}
+      }
+    }
+  );
+}
+
+function launchTtsApp(ttsUrl, responseText) {
+  if (!ttsUrl || !voiceHAConfig || !voiceHAConfig.url) return;
+  var absoluteUrl = /^https?:\/\//.test(ttsUrl)
+    ? ttsUrl
+    : voiceHAConfig.url.replace(/\/$/, '') + ttsUrl;
+  service.call(
+    'luna://com.webos.applicationManager/launch',
+    {
+      id: APP_ID,
+      params: {
+        action: 'tts',
+        ttsUrl: absoluteUrl,
+        responseText: responseText || '',
+      },
+    },
+    function(msg) {
+      log('TTS app launch:', JSON.stringify(msg.payload || {}).slice(0, 200));
+    }
+  );
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -755,6 +782,7 @@ function handlePipelineEvent(evt) {
   } else if (evt.type === 'stt-end') {
     voiceTranscript = (evt.data && evt.data.stt_output && evt.data.stt_output.text) || '';
     log('transcript received, len=' + voiceTranscript.length); // F7: never log the text
+    if (voiceTranscript) sendToast(service, voiceTranscript);
     setVoiceState('processing');
 
   } else if (evt.type === 'intent-end') {
@@ -771,6 +799,7 @@ function handlePipelineEvent(evt) {
       voiceTtsUrl = url;
       scheduleTtsDeliveryFallback();
       setVoiceState('speaking');
+      launchTtsApp(url, voiceResponseText);
     }
 
   } else if (evt.type === 'error') {
@@ -818,6 +847,7 @@ function connectToAudioSocket(socketPath) {
       doStopListening();
     } else {
       setVoiceState('listening');
+      sendToast(service, 'Listening…');
       armVoiceListenTimeout();
     }
   });
@@ -870,9 +900,7 @@ function beginVoiceInteraction(fromApp) {
   voiceResponseText = '';
 
   if (!fromApp) {
-    sendToast(service, 'Listening…');
-    // The inputhook handler launches the overlay independently. Launching it
-    // from this service would restart the service and abort the pipeline.
+    sendToast(service, 'Starting microphone…');
   }
 
   var sttMode = (voiceHAConfig && voiceHAConfig.sttMode) || STT_MODE.LG;
@@ -883,6 +911,7 @@ function beginVoiceInteraction(fromApp) {
   }
 
   setVoiceState('listening');
+  if (!fromApp) sendToast(service, 'Listening…');
   service.call(
     'luna://com.webos.service.voiceconductor/recognizeVoice',
     {},
@@ -1309,6 +1338,7 @@ function runHATextPipeline(text, onIntentResult) {
               voiceTtsUrl = url;
               scheduleTtsDeliveryFallback();
               setVoiceState('speaking');
+              launchTtsApp(url, voiceResponseText);
             } else if (evt.type === 'tts-end' && vcSpeechText) {
               speakNative(vcSpeechText);
               vcSpeechText = '';
