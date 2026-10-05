@@ -88,8 +88,8 @@ What setup does:
 
 Legacy lginputhook calls the script with argument `1` on press and `0` on
 release. Input Hook 1.5+ (`inputhookpp`) executes it once on key-down without an
-argument; HA Voice treats that as press and relies on the TV's voice activity
-detection to finish recording.
+argument, so one press starts recording and a second press stops it. Voice
+activity detection or the 12-second safety timeout can also finish recording.
 
 ---
 

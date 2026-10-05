@@ -1,18 +1,16 @@
 #!/bin/sh
 # Configure org.webosbrew.inputhook to intercept the Magic Remote mic button
-# (keycode 428) and drive hold-to-talk in the HA Voice app.
+# (keycode 428) and drive the HA Voice app.
 #
 # Must be run ON THE TV (via SSH).
 #
 # How it works:
 #   - Legacy inputhook passes an event value on press and release.
 #   - inputhookpp 1.5+ executes only on key-down and passes no argument.
-#   - The wrapper treats a missing argument as a press. VAD ends recording
-#     automatically when inputhookpp cannot signal button release.
+#   - The wrapper treats a missing argument as a toggle: one press starts and
+#     the next press stops. VAD or a timeout can finish it automatically.
 #
-# After running this script:
-#   1. App receives {"action":"start"} on press  → begin recording
-#   2. App receives {"action":"stop"}  on release → stop recording, send to HA
+# Legacy inputhook uses hold-to-talk. inputhookpp 1.5+ uses press-to-toggle.
 
 set -e
 
@@ -23,11 +21,15 @@ KEYBINDS_PATH="/home/root/.config/lginputhook/keybinds.json"
 cat > "$SCRIPT_PATH" << 'HANDLER'
 #!/bin/sh
 # Legacy inputhook: $1 is 1=press, 0=release, 2=repeat.
-# inputhookpp 1.5+: no argument, key-down only.
+# inputhookpp 1.5+: no argument, key-down only, so toggle recording.
 
-VALUE="${1:-1}"
+VALUE="$1"
 
-if [ "$VALUE" = "1" ]; then
+if [ -z "$VALUE" ]; then
+  luna-send -n 1 luna://com.webos.applicationManager/launch \
+    '{"id":"com.homebrew.havoice","params":{"action":"overlay"}}' &
+  luna-send -n 1 luna://com.homebrew.havoice.service/voice/toggle '{}'
+elif [ "$VALUE" = "1" ]; then
   # Button pressed → tell app to start listening
   luna-send -n 1 luna://com.webos.applicationManager/launch \
     '{"id":"com.homebrew.havoice","params":{"action":"start"}}'
@@ -70,4 +72,4 @@ PY
 
 echo ""
 echo "Done! inputhook hot-reloads keybinds every 2 seconds — no restart needed."
-echo "Press and hold the mic button to test."
+echo "Press the mic button to test."

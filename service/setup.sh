@@ -1,11 +1,11 @@
 #!/bin/sh
-# HA Voice – one-time setup for Magic Remote mic button hold-to-talk.
+# HA Voice – one-time setup for the Magic Remote mic button.
 #
 # Run this ONCE on the TV as root (via SSH):
 #   sh /media/developer/apps/usr/palm/applications/com.homebrew.havoice/services/setup.sh
 #
 # What it does:
-#   1. Writes the inputhook handler script for mic key (428) press/release
+#   1. Writes the inputhook handler script for mic key 428
 #   2. Updates /home/root/.config/lginputhook/keybinds.json
 #   3. inputhook hot-reloads keybinds every 2s — no restart needed
 #
@@ -23,11 +23,13 @@ mkdir -p "$KEYBIND_DIR"
 cat > "$HANDLER_SCRIPT" << 'HANDLER'
 #!/bin/sh
 # Legacy inputhook passes $1 as 1=press, 0=release. inputhookpp 1.5+
-# executes only on key-down and passes no argument, which is treated as press.
+# executes only on key-down and passes no argument, which toggles recording.
 # Calls the service directly (applicationManager/launch does not reliably fire
 # webOSRelaunch in the WAM app on all TV models).
-VALUE="${1:-1}"
-if [ "$VALUE" = "1" ]; then
+VALUE="$1"
+if [ -z "$VALUE" ]; then
+  luna-send -n 1 luna://com.homebrew.havoice.service/voice/toggle '{}'
+elif [ "$VALUE" = "1" ]; then
   luna-send -n 1 luna://com.homebrew.havoice.service/voice/start '{}'
 elif [ "$VALUE" = "0" ]; then
   luna-send -n 1 luna://com.homebrew.havoice.service/voice/stop '{}'
@@ -66,4 +68,4 @@ else
 fi
 
 echo ""
-echo "Done! inputhook hot-reloads every 2s — hold the mic button to test."
+echo "Done! inputhook hot-reloads every 2s — press the mic button to test."

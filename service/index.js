@@ -4,7 +4,7 @@
  * HA Voice – Luna service
  *
  * Endpoints:
- *   /setup            – configures inputhook hold-to-talk keybinds (requires root).
+ *   /setup            – configures the Magic Remote mic keybind (requires root).
  *   /isSetupDone      – returns whether the mic button keybind is configured.
  *   /startSetupServer – starts the OAuth companion HTTP server, returns { url }.
  *   /stopSetupServer  – shuts down the companion HTTP server.
@@ -12,6 +12,7 @@
  *   /setHAConfig      – store { url, token, pipelineId } for voice pipeline.
  *   /voice/start      – begin a voice interaction (voiceinput → HA pipeline).
  *   /voice/stop       – stop recording, let HA finish STT → TTS.
+ *   /voice/toggle     – start/stop for press-only inputhookpp key events.
  *   /voice/abort      – abort immediately, return to idle.
  *   /voice/state      – subscribe to { state, transcript, ttsUrl } push updates.
  *
@@ -76,8 +77,11 @@ var MIC_KEYCODE    = '428';
 // Running applicationManager/launch with & decouples it from the service process –
 // calling it inside the service would cause webOS to restart the service mid-pipeline.
 var HANDLER_CONTENT = '#!/bin/sh\n'
-  + 'VALUE="${1:-1}"\n'
-  + 'if [ "$VALUE" = "1" ]; then\n'
+  + 'VALUE="$1"\n'
+  + 'if [ -z "$VALUE" ]; then\n'
+  + '  luna-send -n 1 luna://com.webos.applicationManager/launch \'{"id":"com.homebrew.havoice","params":{"action":"overlay"}}\' &\n'
+  + '  luna-send -n 1 luna://com.homebrew.havoice.service/voice/toggle \'{}\'\n'
+  + 'elif [ "$VALUE" = "1" ]; then\n'
   + '  luna-send -n 1 luna://com.webos.applicationManager/launch \'{"id":"com.homebrew.havoice","params":{"action":"overlay"}}\' &\n'
   + '  luna-send -n 1 luna://com.homebrew.havoice.service/voice/start \'{}\'\n'
   + 'elif [ "$VALUE" = "0" ]; then\n'
@@ -509,6 +513,8 @@ var voiceSub        = null;     // voiceinput luna subscription handle
 var voiceMsgId      = 1;
 var voiceSttHandlerId = null;   // HA binary WebSocket handler for PCM audio
 var voiceStopPending = false;
+var voiceListenTimer = null;
+var VOICE_LISTEN_TIMEOUT_MS = 12000;
 
 // Persist HA config so mic button works without the app being open first.
 // /media/developer/ is on NAND and survives TV reboots (unlike /tmp/).
@@ -546,11 +552,27 @@ function setVoiceState(s) {
 }
 
 function voiceCleanup() {
+  if (voiceListenTimer) { clearTimeout(voiceListenTimer); voiceListenTimer = null; }
   if (voiceSocket) { try { voiceSocket.destroy(); } catch (_) {} voiceSocket = null; }
   if (voiceSub)    { try { voiceSub.cancel();     } catch (_) {} voiceSub    = null; }
   if (voiceWS)     { try { voiceWS.close();       } catch (_) {} voiceWS     = null; }
   voiceSttHandlerId = null;
   voiceStopPending = false;
+}
+
+function armVoiceListenTimeout() {
+  if (voiceListenTimer) clearTimeout(voiceListenTimer);
+  voiceListenTimer = setTimeout(function() {
+    voiceListenTimer = null;
+    if (voiceState === 'listening') {
+      if (voiceSttHandlerId === null) {
+        setVoiceError('voice pipeline start timeout');
+      } else {
+        log('listen timeout – finishing STT stream');
+        doStopListening();
+      }
+    }
+  }, VOICE_LISTEN_TIMEOUT_MS);
 }
 
 // Transition to error then auto-recover to idle after 3 s.
@@ -627,6 +649,7 @@ function startVoicePipeline() {
     return;
   }
 
+  armVoiceListenTimeout();
   ensureFreshToken().then(function() {
     doStartVoicePipeline();
   }).catch(function(err) {
@@ -759,6 +782,7 @@ function connectToAudioSocket(socketPath) {
 
   sock.on('connect', function() {
     log('connected to voiceinput audio socket');
+    armVoiceListenTimeout();
   });
 
   sock.on('data', function(chunk) {
@@ -781,6 +805,7 @@ function connectToAudioSocket(socketPath) {
 }
 
 function doStopListening() {
+  if (voiceListenTimer) { clearTimeout(voiceListenTimer); voiceListenTimer = null; }
   if (voiceSocket) { voiceSocket.destroy(); voiceSocket = null; }
   if (voiceSub)    { try { voiceSub.cancel(); } catch (_) {} voiceSub = null; }
   setVoiceState('processing');
@@ -796,6 +821,55 @@ function doStopListening() {
 // ── Service registration ───────────────────────────────────────────────────────
 
 var service = new Service(SERVICE_ID);
+
+function beginVoiceInteraction(fromApp) {
+  log('begin voice interaction, state=' + voiceState);
+  if (voiceState !== 'idle' && voiceState !== 'error') {
+    log('voice interaction already active, ignoring');
+    return;
+  }
+  voiceTranscript = '';
+  voiceTtsUrl     = '';
+  setVoiceState('listening');
+
+  if (!fromApp) {
+    sendToast(service, 'Listening…');
+    // The inputhook handler launches the overlay independently. Launching it
+    // from this service would restart the service and abort the pipeline.
+  }
+
+  var sttMode = (voiceHAConfig && voiceHAConfig.sttMode) || STT_MODE.LG;
+  if (sttMode === STT_MODE.HA) {
+    startVoicePipeline();
+    return;
+  }
+
+  service.call(
+    'luna://com.webos.service.voiceconductor/recognizeVoice',
+    {},
+    function(msg) {
+      var p = msg.payload;
+      log('recognizeVoice response:', JSON.stringify(p).slice(0, 120));
+      if (!p.returnValue) {
+        log('voiceconductor unavailable, falling back to HA STT pipeline');
+        startVoicePipeline();
+        return;
+      }
+
+      var candidates = (p.text || []).filter(Boolean);
+      log('[vc] recognizeVoice candidates:', JSON.stringify(candidates));
+      if (candidates.length > 0) {
+        if (voiceListenTimer) { clearTimeout(voiceListenTimer); voiceListenTimer = null; }
+        voiceTranscript = candidates[0];
+        setVoiceState('processing');
+        runHATextPipelineWithFallback(candidates);
+      } else {
+        voiceCleanup();
+        setVoiceState('idle');
+      }
+    }
+  );
+}
 
 // Disable the idle timer – keep the process alive for HTTP server + voice pipeline.
 service.activityManager._stopTimer();
@@ -878,54 +952,20 @@ service.register('setHAConfig', function(message) {
 service.register('voice/start', function(message) {
   message.respond({ returnValue: true });
   log('voice/start, state=' + voiceState);
-  if (voiceState !== 'idle' && voiceState !== 'error') {
-    log('voice/start: already active, ignoring');
-    return;
-  }
-  voiceTranscript = '';
-  voiceTtsUrl     = '';
-  setVoiceState('listening');
+  beginVoiceInteraction(message.payload && message.payload.fromApp);
+});
 
-  // If triggered from outside the app (inputhook, luna-send), bring the app to
-  // the foreground as an overlay so the user sees the voice UI from any app.
-  var fromApp = message.payload && message.payload.fromApp;
-  if (!fromApp) {
-    sendToast(service, 'Listening…');
-    // NOTE: we do NOT call applicationManager/launch here.  Doing so from the
-    // service kills the service process (webOS restarts associated services as
-    // part of the app launch lifecycle), aborting the active voice pipeline.
-    // The lginputhook handler script launches the app independently instead.
-  }
-  var sttMode = (voiceHAConfig && voiceHAConfig.sttMode) || STT_MODE.LG;
-  if (sttMode === STT_MODE.HA) {
-    // HA Whisper STT pipeline (audio → STT → intent → TTS).
-    startVoicePipeline();
+/**
+ * /voice/toggle – inputhookpp has key-down events only, so consecutive presses
+ * start and stop a recording.
+ */
+service.register('voice/toggle', function(message) {
+  message.respond({ returnValue: true });
+  log('voice/toggle, state=' + voiceState);
+  if (voiceState === 'listening') {
+    doStopListening();
   } else {
-    // LG ThinQ AI STT via voiceconductor (result arrives via interactor subscription).
-    service.call(
-      'luna://com.webos.service.voiceconductor/recognizeVoice',
-      {},
-      function(msg) {
-        var p = msg.payload;
-        log('recognizeVoice response:', JSON.stringify(p).slice(0, 120));
-        if (!p.returnValue) {
-          log('voiceconductor unavailable, falling back to HA STT pipeline');
-          startVoicePipeline();
-        } else {
-          // recognizeVoice returns a ranked list of candidates.
-          // Try each in sequence: the first that HA's intent engine accepts wins.
-          var candidates = (p.text || []).filter(Boolean);
-          log('[vc] recognizeVoice candidates:', JSON.stringify(candidates));
-          if (candidates.length > 0) {
-            voiceTranscript = candidates[0];
-            setVoiceState('processing');
-            runHATextPipelineWithFallback(candidates);
-          } else {
-            setVoiceState('idle');
-          }
-        }
-      }
-    );
+    beginVoiceInteraction(false);
   }
 });
 
