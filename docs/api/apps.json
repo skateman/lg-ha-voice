@@ -8,18 +8,18 @@
       "description": "Home Assistant Voice Satellite for rooted LG webOS TVs. Use your Magic Remote mic button to control Home Assistant by voice — LG ThinQ AI STT or Whisper, intent recognition, TTS playback.",
       "manifest": {
         "id": "com.homebrew.havoice",
-        "version": "1.1.7",
+        "version": "1.1.8",
         "type": "web",
         "title": "HA Voice",
         "appDescription": "Home Assistant Voice Satellite",
         "iconUri": "https://raw.githubusercontent.com/lorek123/lg-ha-voice/main/assets/icon-large.png",
         "sourceUrl": "https://github.com/lorek123/lg-ha-voice",
         "rootRequired": true,
-        "ipkUrl": "https://github.com/skateman/lg-ha-voice/releases/download/v1.1.7/com.homebrew.havoice_1.1.7_all.ipk",
+        "ipkUrl": "https://github.com/skateman/lg-ha-voice/releases/download/v1.1.8/com.homebrew.havoice_1.1.8_all.ipk",
         "ipkHash": {
-          "sha256": "9afda64a0dca87f07741fd273432f62a270962ab3de001eeb9387a04a851cb1f"
+          "sha256": "b4fbf5b1385abbf9ce0e346e9133de5587b12fefae8c7e69f35aab4775edb443"
         },
-        "ipkSize": 29926
+        "ipkSize": 30110
       }
     }
   ]
