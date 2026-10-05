@@ -526,6 +526,21 @@ function cancelTvPowerSub() {
 
 let _ttsAudio = null;
 let _ttsStartTimer = null;
+let _overlayHideTimer = null;
+
+function scheduleOverlayHide(delay = 1200) {
+  if (_overlayHideTimer) clearTimeout(_overlayHideTimer);
+  _overlayHideTimer = setTimeout(() => {
+    _overlayHideTimer = null;
+    if (!_overlayMode) return;
+    if (_ttsAudio || _ttsStartTimer) {
+      scheduleOverlayHide(1000);
+      return;
+    }
+    _overlayMode = false;
+    if (window.PalmSystem) window.PalmSystem.hide();
+  }, delay);
+}
 
 function stopTtsPlayback() {
   if (_ttsStartTimer) {
@@ -634,6 +649,10 @@ function setOrbState(state) {
   stateLabel.textContent = STATE_LABELS[state] ?? '';
 
   const overlayActive = ACTIVE_STATES.has(state);
+  if (overlayActive && _overlayHideTimer) {
+    clearTimeout(_overlayHideTimer);
+    _overlayHideTimer = null;
+  }
   voiceOverlay.className = overlayActive ? `voice-overlay active ${state}` : 'voice-overlay';
   if (overlayActive) {
     overlayLabel.textContent = OVERLAY_LABELS[state] ?? '';
@@ -649,11 +668,9 @@ function setOrbState(state) {
     }
 
     if (_overlayMode && state === SvcState.IDLE) {
-      _overlayMode = false;
-      // Brief pause so the user sees speaking/result before the overlay hides.
-      setTimeout(() => {
-        if (window.PalmSystem) window.PalmSystem.hide();
-      }, 1200);
+      // webOS freezes background WAM apps. Keep the overlay alive until the
+      // HA audio either starts and finishes or falls back to native TTS.
+      scheduleOverlayHide();
     }
   }
 }
